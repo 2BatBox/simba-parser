@@ -1,12 +1,13 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <cmath>
 
 namespace simba {
 
-template <typename T, const T NullValue>
+template <typename T, T NullValue>
 struct IntNull {
 	T _value;
 
@@ -20,7 +21,17 @@ struct IntNull {
 
 } __attribute__ ((__packed__));
 
-template <typename T, const T NullValue, const T div>
+template <typename T, T div>
+struct Decimal {
+	T _value;
+
+	inline double get() const noexcept {
+		return double(_value) / div;
+	}
+
+} __attribute__ ((__packed__));
+
+template <typename T, T NullValue, T div>
 struct DecimalNull {
 	T _value;
 
@@ -58,13 +69,16 @@ using Int16Null = IntNull<int16_t, int16_t(0x8000)>;
 using Int32Null = IntNull<int32_t, int32_t(0x80000000)>;
 using Int64Null = IntNull<int64_t, int64_t(0x8000000000000000)>;
 
+using Decimal2 = Decimal<int64_t, 100ll>;
+using Decimal5 = Decimal<int64_t, 100000ll>;
+
 using Decimal2Null = DecimalNull<int64_t, 0x7fffffffffffffff, 100ll>;
 using Decimal5Null = DecimalNull<int64_t, 0x7fffffffffffffff, 100000ll>;
 
 using MDFlagsSet = uint64_t;
 using MDEntryType = char;
 
-enum MDFlagsBits : uint8_t {
+enum class MDFlagsBits : uint8_t {
 	Day = 0u,
 	IOC = 1u,
 	NonQuote = 2u,
@@ -114,7 +128,32 @@ const char* md_flag_bits_name(const MDFlagsBits& bits) noexcept {
 	}
 }
 
-enum TemplateId : uint16_t {
+void dump_md_flag_bits(FILE* out, const MDFlagsSet& flags) noexcept {
+	for(uint8_t bit = 0; bit < sizeof(MDFlagsSet) * 8u; ++bit) {
+		const MDFlagsSet mask = 1ull << bit;
+		if(flags & mask) {
+			fprintf(out, " %s", md_flag_bits_name(static_cast<MDFlagsBits>(bit)));
+		}
+	}
+}
+
+enum class MDUpdateAction : uint8_t {
+	New,
+	Change,
+	Delete
+};
+
+const char* md_update_action_name(const MDUpdateAction& id) noexcept {
+	switch(id) {
+		case MDUpdateAction::New: return "New";
+		case MDUpdateAction::Change: return "Change";
+		case MDUpdateAction::Delete: return "Delete";
+		default:
+			return "Unknown";
+	}
+}
+
+enum class TemplateId : uint16_t {
 	Heartbeat = 1u,
 	SequenceReset = 2u,
 	BestPrices = 3u,
@@ -122,7 +161,7 @@ enum TemplateId : uint16_t {
 	OrderUpdate = 5u,
 	OrderExecution = 6u,
 	OrderBookSnapshot = 7u,
-	SecurityStatus = 8u,
+	SecurityStatus = 9u,
 	SecurityDefinitionUpdateReport = 10u,
 	TradingSessionStatus = 11u,
 	SecurityDefinition = 12u,
@@ -154,7 +193,7 @@ const char* template_id_name(const TemplateId& tid) noexcept {
 	}
 }
 
-enum SchemaId : uint16_t {
+enum class SchemaId : uint16_t {
 	Default = 19780
 };
 

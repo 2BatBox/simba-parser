@@ -3,9 +3,7 @@
 #include <cstdlib>
 
 #include "simba/simba.h"
-
 #include "pcap/Frame.h"
-
 
 class SimbaParser {
 protected:
@@ -18,21 +16,18 @@ public:
 
 	bool dump(FILE* out) {
 		bool result = false;
-
 		const simba::MarketDataPacketHeader* market_data_header;
 
 		_frame.dump(out);
-		if(_frame.assign(market_data_header)) {
-			market_data_header->dump(out);
+		if(assign(market_data_header)) {
 
+			market_data_header->dump(out);
 			if(market_data_header->has_flag(simba::MarketDataPacketHeader::Flags::IncrementalPacket)) {
 				result = dump_incremental(out);
 			} else {
 				result = dump_sbe_message(out);
 			}
-
 		}
-
 		return result;
 	}
 
@@ -43,9 +38,14 @@ protected:
 		simba::IncrementalHeader* incremental_header;
 
 		_frame.dump(out);
-		if(_frame.assign(incremental_header)) {
+		if(assign(incremental_header)) {
 			incremental_header->dump(out);
 			result = dump_sbe_message(out);
+
+			while(_frame.available() && result) {
+				result = dump_sbe_message(out);
+			}
+
 		} else {
 			fprintf(stderr, "simba::IncrementalHeader is missed.");
 		}
@@ -59,22 +59,45 @@ protected:
 		const simba::SBEMessageHeader* sbe_header;
 
 		_frame.dump(out);
-		if(_frame.assign(sbe_header)) {
+		if(assign(sbe_header)) {
 			sbe_header->dump(out);
 
 			if(sbe_header->schema_id == simba::SchemaId::Default) {
 				switch(sbe_header->template_id) {
 
+					case simba::TemplateId::Logon:
+					case simba::TemplateId::Logout:
+					case simba::TemplateId::Heartbeat:
+					case simba::TemplateId::SequenceReset:
+					case simba::TemplateId::EmptyBook:
+					case simba::TemplateId::SecurityStatus:
+					case simba::TemplateId::SecurityDefinitionUpdateReport:
+					case simba::TemplateId::TradingSessionStatus:
+					case simba::TemplateId::MarketDataRequest:
+						result = skip_message(*sbe_header);
+						break;
+
+					case simba::TemplateId::SecurityDefinition:
+					case simba::TemplateId::BestPrices:
+					case simba::TemplateId::DiscreteAuction:
+						result = skip_message(*sbe_header) && skip_entry();
+						break;
+
 					case simba::TemplateId::OrderUpdate:
-						result = dump_order_book_snapshot(out, *sbe_header);
+						result = dump_message<simba::OrderUpdate>(out, *sbe_header);
+						break;
+
+					case simba::TemplateId::OrderExecution:
+						result = dump_message<simba::OrderExecution>(out, *sbe_header);
 						break;
 
 					case simba::TemplateId::OrderBookSnapshot:
-						result = dump_order_book_snapshot(out, *sbe_header);
+						result = dump_message_with_entry<simba::OrderBookSnapshotRoot, simba::OrderBookSnapshotEntry>(
+							out, *sbe_header);
 						break;
 
 					default:
-						result = true; // The rest is skipped.
+						fprintf(stderr, "Unknown template id %u \n", static_cast<uint16_t>(sbe_header->template_id));
 						break;
 				}
 			}
@@ -85,88 +108,113 @@ protected:
 		return result;
 	}
 
-	bool dump_order_update(FILE* out, const simba::SBEMessageHeader& sbe_header) noexcept {
-//		simba::OrderBookSnapshotRoot* root;
-//		simba::GroupSize* group_size;
-//		simba::OrderBookSnapshotEntry* entry;
-//
-//		if(sbe_header.block_length != sizeof(simba::OrderBookSnapshotRoot)) {
-//			fprintf(stderr, "OrderBookSnapshotRoot::BlockLength mismatch!");
-//			fprintf(stderr, " block_length=%u", sbe_header.block_length);
-//			fprintf(stderr, " expected=%zu\n", sizeof(simba::OrderBookSnapshotRoot));
-//			return false;
-//		}
-//
-//		if(not _frame.assign(root)) {
-//			fprintf(stderr, "simba::OrderBookSnapshotRoot is missed.");
-//			return false;
-//		}
-//
-//		if(not _frame.assign(group_size)) {
-//			fprintf(stderr, "simba::GroupSize is missed.");
-//			return false;
-//		}
-//
-//		const size_t expected_size = group_size->block_length * group_size->num_in_group;
-//		if(expected_size < _frame.available()) {
-//			fprintf(stderr, "simba::GroupSize::BlockLength mismatch.");
-//			fprintf(stderr, " available=%zu", _frame.available());
-//			fprintf(stderr, " expected=%zu\n", expected_size);
-//			return false;
-//		}
-//
-//		root->dump(out);
-//		group_size->dump(out);
-//
-//		for(simba::uInt8 grp_idx = 0; grp_idx < group_size->num_in_group; ++grp_idx) {
-//			if(_frame.assign(entry)) {
-//				entry->dump(out);
-//			}
-//		}
+	template <typename Header>
+	bool dump_message(FILE* out, const simba::SBEMessageHeader& sbe_header) noexcept {
+		Header* header;
 
+		if(sbe_header.block_length != sizeof(*header)) {
+			fprintf(stderr, "SBEMessageHeader::BlockLength mismatch!");
+			fprintf(stderr, " block_length=%u", sbe_header.block_length);
+			fprintf(stderr, " expected=%zu\n", sizeof(*header));
+			return false;
+		}
+
+		_frame.dump(out);
+		if(not assign(header)) {
+			fprintf(stderr, "The header is missed.");
+			return false;
+		}
+
+		header->dump(out);
 		return true;
+
 	}
 
-	bool dump_order_book_snapshot(FILE* out, const simba::SBEMessageHeader& sbe_header) noexcept {
-		simba::OrderBookSnapshotRoot* root;
+	template <typename Header, typename Entry>
+	bool dump_message_with_entry(FILE* out, const simba::SBEMessageHeader& sbe_header) noexcept {
+		Header* header;
 		simba::GroupSize* group_size;
-		simba::OrderBookSnapshotEntry* entry;
+		Entry* entry;
 
-		if(sbe_header.block_length != sizeof(simba::OrderBookSnapshotRoot)) {
-			fprintf(stderr, "OrderBookSnapshotRoot::BlockLength mismatch!");
+		if(sbe_header.block_length != sizeof(*header)) {
+			fprintf(stderr, "SBEMessageHeader::BlockLength mismatch!");
 			fprintf(stderr, " block_length=%u", sbe_header.block_length);
-			fprintf(stderr, " expected=%zu\n", sizeof(simba::OrderBookSnapshotRoot));
+			fprintf(stderr, " expected=%zu\n", sizeof(*header));
 			return false;
 		}
 
-		if(not _frame.assign(root)) {
-			fprintf(stderr, "simba::OrderBookSnapshotRoot is missed.");
+		_frame.dump(out);
+		if(not assign(header)) {
+			fprintf(stderr, "The header is missed.");
 			return false;
 		}
+		header->dump(out);
 
-		if(not _frame.assign(group_size)) {
+		_frame.dump(out);
+		if(not assign(group_size)) {
 			fprintf(stderr, "simba::GroupSize is missed.");
 			return false;
 		}
 
 		const size_t expected_size = group_size->block_length * group_size->num_in_group;
-		if(expected_size < _frame.available()) {
+		if(expected_size > _frame.available()) {
+			fprintf(stderr, "simba::GroupSize::BlockLength mismatch.");
+			fprintf(stderr, " available=%zu", _frame.available());
+			fprintf(stderr, " expected=%zu\n", expected_size);
+			return false;
+		}
+		group_size->dump(out);
+
+		for(simba::uInt8 grp_idx = 0; grp_idx < group_size->num_in_group; ++grp_idx) {
+			_frame.dump(out);
+			if(assign(entry)) {
+				entry->dump(out);
+			}
+		}
+
+		return true;
+	}
+
+	bool skip_message(const simba::SBEMessageHeader& sbe_header) {
+		bool result = _frame.head_move(sbe_header.block_length);
+		if(not result) {
+			fprintf(stderr, "SBEMessageHeader::BlockLength mismatch!");
+			fprintf(stderr, " block_length=%u", sbe_header.block_length);
+			fprintf(stderr, " available=%zu\n", _frame.available());
+			return false;
+		}
+		return result;
+	}
+
+	bool skip_entry() {
+		simba::GroupSize* group_size;
+		if(not assign(group_size)) {
+			fprintf(stderr, "simba::GroupSize is missed.");
+			return false;
+		}
+
+		const size_t expected_size = group_size->block_length * group_size->num_in_group;
+		if(expected_size > _frame.available()) {
 			fprintf(stderr, "simba::GroupSize::BlockLength mismatch.");
 			fprintf(stderr, " available=%zu", _frame.available());
 			fprintf(stderr, " expected=%zu\n", expected_size);
 			return false;
 		}
 
-		root->dump(out);
-		group_size->dump(out);
-
-		for(simba::uInt8 grp_idx = 0; grp_idx < group_size->num_in_group; ++grp_idx) {
-			if(_frame.assign(entry)) {
-				entry->dump(out);
-			}
-		}
+		_frame.head_move(expected_size);
 
 		return true;
+	}
+
+	template<typename V>
+	inline bool assign(V*& pointer) noexcept {
+		bool result = _frame.assign(pointer);
+#if __BYTE_ORDER == __BIG_ENDIAN
+		if(result){
+			pointer->swap_endian();
+		}
+#endif
+		return result;
 	}
 };
 
